@@ -33,6 +33,64 @@ from career_guide import CareerGuide
 from models import PriorityLevel, RiskFactor, RiskSeverity
 
 
+def _pdf_safe_text(text: str) -> str:
+    """Map common Unicode to Latin-1 for PDF core fonts (Helvetica)."""
+    if not text:
+        return ""
+    replacements = {
+        "\u2192": "->",
+        "\u2014": "--",
+        "\u2013": "-",
+        "\u2022": "*",
+        "\u21c4": "<->",
+        "\u2713": "[x]",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2026": "...",
+        "\u00a0": " ",
+    }
+    out = text
+    for old, new in replacements.items():
+        out = out.replace(old, new)
+    return out.encode("latin-1", "replace").decode("latin-1")
+
+
+def _build_advising_report_pdf(report_text: str) -> bytes:
+    """Build a multi-page PDF from the same plain-text report used for .txt export."""
+    from fpdf import FPDF
+
+    class AdvisingPDF(FPDF):
+        def footer(self):
+            self.set_y(-12)
+            self.set_font("Helvetica", "I", 8)
+            self.set_text_color(110, 110, 110)
+            self.cell(
+                0,
+                8,
+                "GatorGrad | For planning only -- consult your advisor.",
+                align="C",
+            )
+
+    pdf = AdvisingPDF()
+    pdf.set_margins(14, 14, 14)
+    pdf.set_auto_page_break(auto=True, margin=16)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(28, 28, 28)
+
+    width = pdf.epw
+    for raw_line in report_text.split("\n"):
+        line = _pdf_safe_text(raw_line)
+        if not line.strip():
+            pdf.ln(2)
+            continue
+        pdf.multi_cell(width, 4.6, line)
+
+    return bytes(pdf.output())
+
+
 # =============================================================================
 # PAGE CONFIGURATION
 # Must be the first Streamlit command in the script.
@@ -800,80 +858,81 @@ if run_button:
         "It gives your advisor a head start on understanding your progress."
     )
 
-    # --- Print / Download buttons ---
-    col_print, col_download = st.columns(2)
+    # --- Download report (PDF uses Streamlit's download like .txt; browser Print is unreliable in embedded apps) ---
+    col_pdf, col_txt = st.columns(2)
 
-    with col_print:
-        st.markdown(
-            '<button onclick="window.print()" style="'
-            "width:100%;padding:0.6rem 1rem;font-size:1rem;font-weight:600;"
-            "background:#A0527E;color:white;border:none;border-radius:8px;"
-            'cursor:pointer;">🖨️ Print / Save as PDF</button>',
-            unsafe_allow_html=True,
+    lines = []
+    lines.append("=" * 60)
+    lines.append("GatorGrad — Advising Report")
+    lines.append("=" * 60)
+    lines.append("")
+    lines.append(f"Program: {progress.student.program_code}")
+    lines.append(f"Catalog Year: {progress.student.catalog_year}")
+    lines.append(f"GPA: {progress.student.cumulative_gpa:.2f} (Major: {progress.student.major_gpa:.2f})")
+    lines.append(f"Units: {progress.student.total_units_completed:.0f} / 120")
+    lines.append(f"Progress: {progress.percent_complete:.1f}%")
+    lines.append(f"Completed: {len(progress.completed)} | In Progress: {len(progress.in_progress)} | Remaining: {len(progress.remaining)}")
+    lines.append("")
+
+    lines.append("-" * 60)
+    lines.append("GRADUATION PATHWAY")
+    lines.append("-" * 60)
+    lines.append(f"Estimated Graduation: {pathway.estimated_graduation}")
+    lines.append(f"Semesters Remaining: {len(pathway.semesters)}")
+    lines.append("")
+    for sem in pathway.semesters:
+        lines.append(f"  {sem.label} ({sem.total_units:.0f} units)")
+        for c in sem.courses:
+            unit_part = f" ({c.units:.0f} units)" if c.units > 1 else ""
+            lines.append(f"    [{c.priority.value.upper()}] {c.code} — {c.title}{unit_part}")
+        lines.append("")
+
+    lines.append("-" * 60)
+    lines.append("COURSE EXPLANATIONS")
+    lines.append("-" * 60)
+    lines.append(explanation.overall_strategy)
+    lines.append("")
+    for ce in explanation.course_explanations:
+        lines.append(f"  {ce.course_code} ({ce.semester_label})")
+        for r in ce.reasons:
+            lines.append(f"    → {r}")
+        lines.append("")
+
+    if career_report.career_paths:
+        lines.append("-" * 60)
+        lines.append("CAREER PATHS")
+        lines.append("-" * 60)
+        for career in career_report.career_paths:
+            lines.append(f"  {career.title} — {int(career.match_score * 100)}% match")
+            lines.append(f"    {career.salary_range} | {career.job_outlook}")
+        lines.append("")
+
+    lines.append("-" * 60)
+    lines.append("ADVISING RESOURCES")
+    lines.append("-" * 60)
+    lines.append("  UAC (GE & Degree Planning): https://advising.sfsu.edu/")
+    dept_name_dl, dept_url_dl = DEPT_LINKS.get(
+        progress.student.program_code,
+        ("your major department", "https://sfsu.edu")
+    )
+    lines.append(f"  {dept_name_dl}: {dept_url_dl}")
+    lines.append("")
+    lines.append("This report is for planning purposes only.")
+    lines.append("Please consult a human advisor to finalize your plan.")
+
+    report_text = "\n".join(lines)
+    pdf_bytes = _build_advising_report_pdf(report_text)
+
+    with col_pdf:
+        st.download_button(
+            label="📥 Download Report (.pdf)",
+            data=pdf_bytes,
+            file_name="GatorGrad_Advising_Report.pdf",
+            mime="application/pdf",
+            use_container_width=True,
         )
 
-    with col_download:
-        lines = []
-        lines.append("=" * 60)
-        lines.append("GatorGrad — Advising Report")
-        lines.append("=" * 60)
-        lines.append("")
-        lines.append(f"Program: {progress.student.program_code}")
-        lines.append(f"Catalog Year: {progress.student.catalog_year}")
-        lines.append(f"GPA: {progress.student.cumulative_gpa:.2f} (Major: {progress.student.major_gpa:.2f})")
-        lines.append(f"Units: {progress.student.total_units_completed:.0f} / 120")
-        lines.append(f"Progress: {progress.percent_complete:.1f}%")
-        lines.append(f"Completed: {len(progress.completed)} | In Progress: {len(progress.in_progress)} | Remaining: {len(progress.remaining)}")
-        lines.append("")
-
-        lines.append("-" * 60)
-        lines.append("GRADUATION PATHWAY")
-        lines.append("-" * 60)
-        lines.append(f"Estimated Graduation: {pathway.estimated_graduation}")
-        lines.append(f"Semesters Remaining: {len(pathway.semesters)}")
-        lines.append("")
-        for sem in pathway.semesters:
-            lines.append(f"  {sem.label} ({sem.total_units:.0f} units)")
-            for c in sem.courses:
-                unit_part = f" ({c.units:.0f} units)" if c.units > 1 else ""
-                lines.append(f"    [{c.priority.value.upper()}] {c.code} — {c.title}{unit_part}")
-            lines.append("")
-
-        lines.append("-" * 60)
-        lines.append("COURSE EXPLANATIONS")
-        lines.append("-" * 60)
-        lines.append(explanation.overall_strategy)
-        lines.append("")
-        for ce in explanation.course_explanations[:10]:
-            lines.append(f"  {ce.course_code} ({ce.semester_label})")
-            for r in ce.reasons:
-                lines.append(f"    → {r}")
-            lines.append("")
-
-        if career_report.career_paths:
-            lines.append("-" * 60)
-            lines.append("CAREER PATHS")
-            lines.append("-" * 60)
-            for career in career_report.career_paths:
-                lines.append(f"  {career.title} — {int(career.match_score * 100)}% match")
-                lines.append(f"    {career.salary_range} | {career.job_outlook}")
-            lines.append("")
-
-        lines.append("-" * 60)
-        lines.append("ADVISING RESOURCES")
-        lines.append("-" * 60)
-        lines.append("  UAC (GE & Degree Planning): https://advising.sfsu.edu/")
-        dept_name_dl, dept_url_dl = DEPT_LINKS.get(
-            progress.student.program_code,
-            ("your major department", "https://sfsu.edu")
-        )
-        lines.append(f"  {dept_name_dl}: {dept_url_dl}")
-        lines.append("")
-        lines.append("This report is for planning purposes only.")
-        lines.append("Please consult a human advisor to finalize your plan.")
-
-        report_text = "\n".join(lines)
-
+    with col_txt:
         st.download_button(
             label="📥 Download Report (.txt)",
             data=report_text,
@@ -881,6 +940,11 @@ if run_button:
             mime="text/plain",
             use_container_width=True,
         )
+
+    st.caption(
+        "To print the on-screen layout, use your browser: **File → Print** (or Ctrl/Cmd+P) "
+        "and choose **Save as PDF** if you want a PDF from the web view."
+    )
 
     # =========================================================================
     # Resources & References

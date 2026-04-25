@@ -150,10 +150,8 @@ def create_ge_requirements_2025_26() -> List[Requirement]:
 
 
 def create_university_requirements() -> List[Requirement]:
-    """University requirements (SF State Studies, GWAR) - consistent across all years"""
+    """University requirements (SF State Studies) - consistent across all years."""
     return [
-        Requirement("UNIV_GWAR", "Graduation Writing Assessment Requirement", "University", "GWAR", 0,
-                    notes="Satisfied by completing a GWAR course with C- or better"),
         Requirement("UNIV_AERM", "SF State Studies: American Ethnic & Racial Minorities", "University", "SF State Studies", 3),
         Requirement("UNIV_ES", "SF State Studies: Environmental Sustainability", "University", "SF State Studies", 3,
                     notes="Renamed to 'Environmental Sustainability and Climate Action' in 2025-26"),

@@ -148,11 +148,6 @@ class PathwayRecommender:
         # Output sorted highest priority first.
 
         courses = []
-        has_major_or_ge_gwar_course = any(
-            self._is_gwar_designated_requirement(req) and req.req_id != "UNIV_GWAR"
-            for req in remaining
-        )
-
         all_needed_codes = set()
         for req in remaining:
             if req.course_options:
@@ -162,11 +157,6 @@ class PathwayRecommender:
                 all_needed_codes.add(req.req_id)
 
         for req in remaining:
-            if req.req_id == "UNIV_GWAR" and has_major_or_ge_gwar_course:
-                # Avoid duplicate planning rows when GWAR is already represented by a
-                # specific GW-designated course requirement (e.g., PSY 305GW).
-                continue
-
             course_code = ""
             course_title = self._display_requirement_title(req.req_name)
             units = req.units_needed
@@ -225,13 +215,6 @@ class PathwayRecommender:
         courses.sort(key=lambda c: priority_order[c.priority])
 
         return courses
-
-    @staticmethod
-    def _is_gwar_designated_requirement(req: RequirementMatch) -> bool:
-        codes = set(req.course_options or [])
-        if req.fulfilled_by:
-            codes.add(req.fulfilled_by)
-        return any(str(code).strip().endswith("GW") for code in codes if code)
 
     def _calculate_priority(
         self, req: RequirementMatch, course_code: str, all_needed: Set[str]
@@ -309,8 +292,12 @@ class PathwayRecommender:
             # are eligible (no same-semester prereq chaining).
             term_completed = set(will_be_completed)
             while True:
-                pending_intro = {c.code for c in unscheduled} & _CS_INTRO_GATE_CODES
-                intro_gate = bool(pending_intro)
+                # Keep upper-core CSC blocked for the entire term until the intro
+                # programming foundation is already complete before term start.
+                intro_gate = not self._cs_programming_intro_done(term_completed)
+                intro_in_this_term = any(
+                    c.code in _CS_INTRO_GATE_CODES for c in semester_courses
+                )
                 lower_ge_pending = any(
                     self._is_lower_div_ge_course(c) for c in unscheduled
                 )
@@ -320,7 +307,7 @@ class PathwayRecommender:
 
                 eligible: List[ScheduledCourse] = []
                 for course in unscheduled:
-                    if intro_gate and course.code in _CS_UPPER_CORE_GATE:
+                    if (intro_gate or intro_in_this_term) and course.code in _CS_UPPER_CORE_GATE:
                         continue
                     if chem_lower_pending and self._is_upper_div_chem_course(course):
                         continue

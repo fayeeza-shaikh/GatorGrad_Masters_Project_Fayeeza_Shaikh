@@ -26,7 +26,7 @@ import json
 import datetime
 
 from bulletin_data import BulletinDatabase
-from dpr_parser import DPRParser, SAMPLE_STUDENTS
+from dpr_parser import DPRParser, SAMPLE_CATALOG_YEARS, SAMPLE_STUDENTS
 from recommender import PathwayRecommender
 from explainer import PathwayExplainer
 from career_guide import CareerGuide
@@ -384,6 +384,7 @@ with st.sidebar:
 
     uploaded_file = None
     sample_major = None
+    sample_catalog_year = None
 
     if input_mode == "Upload DPR PDF":
         uploaded_file = st.file_uploader(
@@ -410,6 +411,19 @@ with st.sidebar:
             help="Pick a sample student to see the full advising report for that major."
         )
 
+        _default_cat_idx = (
+            SAMPLE_CATALOG_YEARS.index("2024-25")
+            if "2024-25" in SAMPLE_CATALOG_YEARS
+            else 0
+        )
+        sample_catalog_year = st.selectbox(
+            "Catalog year (bulletin requirements)",
+            SAMPLE_CATALOG_YEARS,
+            index=_default_cat_idx,
+            help="Sample profiles have no catalog year from a DPR. Choose which bulletin "
+            "year’s requirements to use for this preview (same six years as in the database).",
+        )
+
         st.caption(
             "⚠️ Sample data is for trial purposes only. "
             "Please upload your own DPR for personalized advising."
@@ -428,7 +442,16 @@ with st.sidebar:
 
     st.markdown("*More majors coming soon!*")
 
-    st.markdown("**Catalog Years:** 2020-21 through 2025-26")
+    if input_mode == "Upload DPR PDF":
+        st.caption(
+            "Your catalog year is read from the uploaded DPR. "
+            "Bulletin data covers 2020-21 through 2025-26."
+        )
+    else:
+        st.caption(
+            f"Sample mode uses the catalog year you select above "
+            f"({', '.join(SAMPLE_CATALOG_YEARS)})."
+        )
 
     st.divider()
 
@@ -479,8 +502,14 @@ if run_button:
         st.stop()
 
     else:
-        with st.spinner(f"Loading sample data for {sample_major}..."):
-            progress = parser.parse_dict(SAMPLE_STUDENTS[sample_major])
+        with st.spinner(
+            f"Loading sample data for {sample_major} ({sample_catalog_year})..."
+        ):
+            sample_payload = {
+                **SAMPLE_STUDENTS[sample_major],
+                "catalog_year": sample_catalog_year,
+            }
+            progress = parser.parse_dict(sample_payload)
 
     # Check if major is supported
     if progress.student.program_code == "UNKNOWN" or \

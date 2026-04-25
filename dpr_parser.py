@@ -471,6 +471,16 @@ class DPRParser:
 # =============================================================================
 # SAMPLE DATA — For testing without a PDF
 # =============================================================================
+# BulletinDatabase defines one program snapshot per (code, year); Streamlit
+# sample mode lets users pick any of these (DPR PDFs supply catalog_year from text).
+SAMPLE_CATALOG_YEARS = (
+    "2020-21",
+    "2021-22",
+    "2022-23",
+    "2023-24",
+    "2024-25",
+    "2025-26",
+)
 
 SAMPLE_STUDENT_CSC = {
     "student_id": "912345678",

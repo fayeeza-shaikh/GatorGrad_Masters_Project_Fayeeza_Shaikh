@@ -193,7 +193,7 @@ class PathwayRecommender:
 
             priority = self._calculate_priority(req, course_code, all_needed_codes)
 
-            prereqs = self.prereq_map.get(course_code, [])
+            prereqs = self.prereq_map.get(course_code, []) if req.category == "Major" else []
 
             course = ScheduledCourse(
                 code=course_code,
@@ -358,10 +358,8 @@ class PathwayRecommender:
 
             sem_name, sem_year = self._next_semester(sem_name, sem_year)
 
-        # Overflow beyond MAX_SEMESTERS: attach leftovers to last plan (caller may warn).
-        if unscheduled and semesters:
-            for course in unscheduled:
-                semesters[-1].add_course(course)
+        # Do not force-place leftovers just to fill output. If a course never becomes
+        # eligible under prerequisite gating, placing it anyway would violate the chain.
 
         return semesters
 
@@ -456,18 +454,23 @@ class PathwayRecommender:
     # =========================================================================
 
     def _build_prereq_map(self) -> Dict[str, List[str]]:
-        # Union of bulletin-derived placeholders and hand-authored chains below.
-        # Prerequisite detail in bulletin notes is partial; chains are curated for the prototype majors.
+        # Union of note-derived prerequisites and hand-authored chains below.
+        # Many bulletin notes include prerequisite hints; curated chains fill remaining gaps.
 
         prereq_map = {}
 
         for key in self.db.list_programs():
             program = self.db.programs[key]
             for req in program.major_requirements:
-                if req.courses and hasattr(req, 'notes') and req.notes:
-                    for code in req.courses:
-                        if code not in prereq_map:
-                            prereq_map[code] = []
+                if not req.courses:
+                    continue
+                note_prereqs = self._extract_prereqs_from_notes(req.notes or "")
+                for code in req.courses:
+                    if code not in prereq_map:
+                        prereq_map[code] = []
+                    for dep in note_prereqs:
+                        if dep != code and dep not in prereq_map[code]:
+                            prereq_map[code].append(dep)
 
         # --- Hardcoded prerequisite chains for our 5 majors ---
         # Prototype: key sequencing edges; production would load from an authoritative prereq source.
@@ -551,6 +554,24 @@ class PathwayRecommender:
                     prereq_map[code] = deps
 
         return prereq_map
+
+    @staticmethod
+    def _extract_prereqs_from_notes(notes: str) -> List[str]:
+        """
+        Parse probable prerequisite course codes from requirement notes.
+        Example: 'Prerequisite: PSY 200. Grade C or better required.' -> ['PSY 200']
+        """
+        if not notes:
+            return []
+        if "prereq" not in notes.lower():
+            return []
+        tokens = re.findall(r"\b([A-Z]{2,5}\s?\d{3}[A-Z]{0,2})\b", notes.upper())
+        seen: List[str] = []
+        for token in tokens:
+            norm = re.sub(r"\s+", " ", token).strip()
+            if norm not in seen:
+                seen.append(norm)
+        return seen
 
     # =========================================================================
     # STEP 6: GENERATE WARNINGS

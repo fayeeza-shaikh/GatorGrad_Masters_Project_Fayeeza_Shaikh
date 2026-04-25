@@ -17,6 +17,7 @@
 # IMPORTS
 # -----------------------------------------------------------------------------
 
+import re
 from typing import List, Dict, Set, Optional, Tuple
 
 from models import (
@@ -34,6 +35,21 @@ from bulletin_data import (
     DegreeProgram,
     Requirement
 )
+
+# Sentinel stored in prereq_map lists — satisfied by legacy CSC 210 or 2023+ CSC 101+CSC 215.
+CS_PROGRAMMING_INTRO = "__CS_PROGRAMMING_INTRO__"
+# Do not schedule these until first-programming intro courses are cleared from the plan.
+_CS_INTRO_GATE_CODES = frozenset({"CSC 101", "CSC 215", "CSC 210"})
+# Upper-division core that should not run ahead of a coherent CS intro sequence.
+_CS_UPPER_CORE_GATE = frozenset({"CSC 413", "CSC 415", "CSC 510", "CSC 648"})
+# Foundational GE areas to front-load before other GE buckets when possible.
+_FOUNDATIONAL_GE_IDS = frozenset({
+    "GE_1A", "GE_1B", "GE_1C", "GE_2",  # 2025-26+ framework
+    "GE_A1", "GE_A2", "GE_A3", "GE_B4",  # legacy equivalents
+})
+_CHEM_LOWER_GATE_CODES = frozenset({
+    "CHEM 115", "CHEM 215", "CHEM 233", "CHEM 234", "CHEM 235", "CHEM 236", "CHEM 251"
+})
 
 
 # =============================================================================
@@ -132,6 +148,10 @@ class PathwayRecommender:
         # Output sorted highest priority first.
 
         courses = []
+        has_major_or_ge_gwar_course = any(
+            self._is_gwar_designated_requirement(req) and req.req_id != "UNIV_GWAR"
+            for req in remaining
+        )
 
         all_needed_codes = set()
         for req in remaining:
@@ -142,12 +162,40 @@ class PathwayRecommender:
                 all_needed_codes.add(req.req_id)
 
         for req in remaining:
+            if req.req_id == "UNIV_GWAR" and has_major_or_ge_gwar_course:
+                # Avoid duplicate planning rows when GWAR is already represented by a
+                # specific GW-designated course requirement (e.g., PSY 305GW).
+                continue
+
             course_code = ""
-            course_title = req.req_name
+            course_title = self._display_requirement_title(req.req_name)
             units = req.units_needed
 
             if req.course_options:
-                course_code = req.course_options[0]
+                if "Elective" in req.req_name:
+                    prefix = req.course_options[0].split()[0] if req.course_options else "COURSE"
+                    slot_units = 3.0
+                    remaining_units = max(slot_units, float(req.units_needed))
+                    priority = self._calculate_priority(req, prefix, all_needed_codes)
+                    slot_idx = 1
+                    while remaining_units > 0:
+                        this_slot = min(slot_units, remaining_units)
+                        slot_code = f"{prefix} ELECTIVE {slot_idx}"
+                        course = ScheduledCourse(
+                            code=slot_code,
+                            title=f"{self._display_requirement_title(req.req_name)} (Choose from approved options)",
+                            units=this_slot,
+                            category=req.category,
+                            priority=priority,
+                            prerequisites=[],
+                            reason=""
+                        )
+                        courses.append(course)
+                        remaining_units -= this_slot
+                        slot_idx += 1
+                    continue
+                else:
+                    course_code = req.course_options[0]
             elif req.notes:
                 course_code = req.req_id
             else:
@@ -178,6 +226,13 @@ class PathwayRecommender:
 
         return courses
 
+    @staticmethod
+    def _is_gwar_designated_requirement(req: RequirementMatch) -> bool:
+        codes = set(req.course_options or [])
+        if req.fulfilled_by:
+            codes.add(req.fulfilled_by)
+        return any(str(code).strip().endswith("GW") for code in codes if code)
+
     def _calculate_priority(
         self, req: RequirementMatch, course_code: str, all_needed: Set[str]
     ) -> PriorityLevel:
@@ -200,6 +255,8 @@ class PathwayRecommender:
                 return PriorityLevel.MEDIUM
 
         if req.category == "GE":
+            if req.req_id in _FOUNDATIONAL_GE_IDS:
+                return PriorityLevel.HIGH
             return PriorityLevel.MEDIUM
 
         if req.category == "University":
@@ -244,26 +301,62 @@ class PathwayRecommender:
 
             max_units = self.MAX_UNITS_SUMMER if sem_name == "Summer" else self.MAX_UNITS_PER_SEMESTER
 
-            eligible = []
-            for course in unscheduled:
-                if self._prerequisites_met(course, will_be_completed):
-                    eligible.append(course)
-
-            if not eligible:
-                # Nothing is eligible yet; advance time so prior terms can "complete"
-                # prerequisites (avoids stalling when the greedy pick is wrong locally).
-                sem_name, sem_year = self._next_semester(sem_name, sem_year)
-                continue
-
             semester_courses = []
             semester_units = 0.0
 
-            for course in eligible:
-                if semester_units + course.units <= max_units:
-                    semester_courses.append(course)
-                    semester_units += course.units
+            # Pack semester with term-level prerequisite enforcement:
+            # only courses whose prerequisites were completed before this term starts
+            # are eligible (no same-semester prereq chaining).
+            term_completed = set(will_be_completed)
+            while True:
+                pending_intro = {c.code for c in unscheduled} & _CS_INTRO_GATE_CODES
+                intro_gate = bool(pending_intro)
+                lower_ge_pending = any(
+                    self._is_lower_div_ge_course(c) for c in unscheduled
+                )
+                chem_lower_pending = any(
+                    str(c.code) in _CHEM_LOWER_GATE_CODES for c in unscheduled
+                )
+
+                eligible: List[ScheduledCourse] = []
+                for course in unscheduled:
+                    if intro_gate and course.code in _CS_UPPER_CORE_GATE:
+                        continue
+                    if chem_lower_pending and self._is_upper_div_chem_course(course):
+                        continue
+                    if lower_ge_pending and self._is_upper_div_ge_course(course):
+                        # Keep UD GE buckets (3UD/4UD/5UD and legacy UDB/UDC/UDD)
+                        # behind all lower-division GE requirements.
+                        continue
+                    if not self._prerequisites_met(course, term_completed):
+                        continue
+                    if semester_units + course.units > max_units:
+                        continue
+                    eligible.append(course)
+
+                if not eligible:
+                    break
+
+                major_units = sum(
+                    c.units for c in semester_courses if self._is_major_course(c)
+                )
+                non_major_units = semester_units - major_units
+                need_major = major_units < non_major_units
+
+                preferred = [
+                    c for c in eligible if self._is_major_course(c) == need_major
+                ]
+                picked: Optional[ScheduledCourse] = preferred[0] if preferred else eligible[0]
+
+                if picked is None:
+                    break
+
+                semester_courses.append(picked)
+                semester_units += picked.units
+                unscheduled.remove(picked)
 
             if not semester_courses:
+                # Nothing fits this term; advance time so prerequisites can clear.
                 sem_name, sem_year = self._next_semester(sem_name, sem_year)
                 continue
 
@@ -273,9 +366,7 @@ class PathwayRecommender:
                 courses=semester_courses
             )
             semesters.append(plan)
-
             for course in semester_courses:
-                unscheduled.remove(course)
                 will_be_completed.add(course.code)
 
             sem_name, sem_year = self._next_semester(sem_name, sem_year)
@@ -287,16 +378,72 @@ class PathwayRecommender:
 
         return semesters
 
+    @staticmethod
+    def _is_major_course(course: ScheduledCourse) -> bool:
+        """Treat Major bucket as one side of 50/50 mix; GE+University on the other."""
+        return course.category == "Major"
+
+    @staticmethod
+    def _is_upper_div_ge_course(course: ScheduledCourse) -> bool:
+        if course.category != "GE":
+            return False
+        code = str(course.code).strip().upper()
+        return code in {"GE_3UD", "GE_4UD", "GE_5UD", "GE_UDB", "GE_UDC", "GE_UDD"}
+
+    def _is_lower_div_ge_course(self, course: ScheduledCourse) -> bool:
+        if course.category != "GE":
+            return False
+        return not self._is_upper_div_ge_course(course)
+
+    @staticmethod
+    def _is_upper_div_chem_course(course: ScheduledCourse) -> bool:
+        if course.category != "Major":
+            return False
+        code = str(course.code).strip().upper()
+        if not code.startswith("CHEM "):
+            return False
+        parts = code.split()
+        if len(parts) < 2:
+            return False
+        number_part = "".join(ch for ch in parts[1] if ch.isdigit())
+        if not number_part:
+            return False
+        return int(number_part) >= 300
+
+    @staticmethod
+    def _display_requirement_title(req_name: str) -> str:
+        """
+        Keep UI labels concise for area-bucket requirements.
+        Example: "Area 1: Basic Psychological Processes" -> "Area 1"
+        """
+        m = re.match(r"^(Area\s+\d+)\s*:", req_name.strip(), flags=re.IGNORECASE)
+        if m:
+            return m.group(1)
+        return req_name
+
     # =========================================================================
     # HELPER: CHECK IF PREREQUISITES ARE MET
     # =========================================================================
 
+    @staticmethod
+    def _cs_programming_intro_done(completed: Set[str]) -> bool:
+        """CSC 210 (legacy) or CSC 101 + CSC 215 (2023+ catalog) satisfies first programming."""
+        if "CSC 210" in completed:
+            return True
+        return "CSC 101" in completed and "CSC 215" in completed
+
+    def _prerequisite_token_met(self, token: str, completed: Set[str]) -> bool:
+        if token == CS_PROGRAMMING_INTRO:
+            return self._cs_programming_intro_done(completed)
+        return token in completed
+
     def _prerequisites_met(self, course: ScheduledCourse, completed: Set[str]) -> bool:
-        if not course.prerequisites:
+        prereqs = course.prerequisites
+        if not prereqs:
             return True
 
-        for prereq in course.prerequisites:
-            if prereq not in completed:
+        for prereq in prereqs:
+            if not self._prerequisite_token_met(prereq, completed):
                 return False
 
         return True
@@ -339,20 +486,20 @@ class PathwayRecommender:
         # Prototype: key sequencing edges; production would load from an authoritative prereq source.
 
         cs_prereqs = {
-            # Computer Science BS prerequisite chain
-            "CSC 220": ["CSC 210"],        # Data Structures needs Intro to Programming
-            "CSC 230": ["CSC 210"],        # Discrete Math needs Intro
-            "CSC 256": ["CSC 220"],        # Machine Structures needs Data Structures
-            "CSC 310": ["CSC 220"],        # Algorithms needs Data Structures
-            "CSC 340": ["CSC 220"],        # Programming Methodology needs Data Structures
-            "CSC 317": ["CSC 210"],        # Web Dev needs Intro
-            "CSC 413": ["CSC 310"],        # Software Development needs Algorithms
-            "CSC 415": ["CSC 310", "CSC 256"],  # OS needs Algorithms + Machine Structures
-            "CSC 510": ["CSC 310"],        # Analysis of Algorithms needs Algorithms
-            "CSC 648": ["CSC 413"],        # Software Engineering needs Software Dev
-            "CSC 300GW": ["CSC 210"],      # Ethics (GWAR) needs Intro
-            "CSC 215": ["CSC 210"],        # Intermediate Programming needs Intro
-            "CSC 101": [],                 # Intro to Computing — no prereqs
+            # Computer Science BS — intro: CSC 210 (legacy) or CSC 101 + CSC 215 (2023+ bulletins)
+            "CSC 101": [],
+            "CSC 215": ["CSC 101"],
+            "CSC 220": [CS_PROGRAMMING_INTRO],
+            "CSC 230": ["CSC 220"],
+            "CSC 256": ["CSC 220"],
+            "CSC 310": ["CSC 220"],
+            "CSC 340": ["CSC 220"],
+            "CSC 317": ["CSC 220"],
+            "CSC 413": ["CSC 220", "CSC 317"],
+            "CSC 415": ["CSC 310", "CSC 256"],
+            "CSC 510": ["CSC 310"],
+            "CSC 648": ["CSC 413"],
+            "CSC 300GW": ["CSC 220"],
             "MATH 227": ["MATH 226"],      # Calc II needs Calc I
             "MATH 225": ["MATH 226"],      # Linear Algebra needs Calc I
             "MATH 324": ["MATH 226"],      # Prob & Stats needs Calc I
@@ -363,13 +510,13 @@ class PathwayRecommender:
         }
 
         cmpe_prereqs = {
-            # Computer Engineering BS prerequisite chain
+            # Computer Engineering BS prerequisite chain (shared CSC keys must match CS intro logic)
             "ENGR 213": ["MATH 226"],      # Statics needs Calc I
-            "ENGR 200": ["CSC 210"],       # Intro to Engineering needs programming
-            "CSC 220": ["CSC 210"],
+            "ENGR 200": [CS_PROGRAMMING_INTRO],
+            "CSC 220": [CS_PROGRAMMING_INTRO],
             "CSC 256": ["CSC 220"],
             "CSC 310": ["CSC 220"],
-            "CSC 413": ["CSC 310"],
+            "CSC 413": ["CSC 220", "CSC 317"],
             "ENGR 323": ["ENGR 213"],      # Dynamics needs Statics
             "ENGR 301": ["MATH 227"],      # Circuits needs Calc II
             "ENGR 302": ["ENGR 301"],      # Circuits II needs Circuits I
@@ -392,17 +539,29 @@ class PathwayRecommender:
         }
 
         chem_prereqs = {
-            # Chemistry BS prerequisite chain
-            "CHEM 116": ["CHEM 115"],      # Gen Chem II needs Gen Chem I
-            "CHEM 215": ["CHEM 116"],      # Organic I needs Gen Chem II
-            "CHEM 216": ["CHEM 215"],      # Organic II needs Organic I
-            "CHEM 315": ["CHEM 216"],      # Analytical needs Organic II
-            "CHEM 340": ["CHEM 116", "MATH 227"],  # P-Chem needs Gen Chem II + Calc II
+            # Chemistry BS prerequisite chain (updated for recent catalogs)
+            "CHEM 215": ["CHEM 115"],              # General Chem II after Chem I
+            "CHEM 233": ["CHEM 215"],              # Organic I after Gen Chem II
+            "CHEM 234": ["CHEM 233"],              # Organic I Lab after Organic I
+            "CHEM 235": ["CHEM 233"],              # Organic II after Organic I
+            "CHEM 236": ["CHEM 235"],              # Organic II Lab after Organic II
+            "CHEM 321": ["CHEM 235"],              # Quantitative Analysis after Org II
+            "CHEM 322": ["CHEM 321"],              # Quant Analysis Lab after lecture
+            "CHEM 325": ["CHEM 235"],              # Inorganic Chemistry after Org II
+            "CHEM 340": ["CHEM 235", "MATH 227"],  # Biochemistry I after Org II + Calc II
+            "CHEM 351": ["CHEM 251", "MATH 227"],  # P-Chem I after math/physics foundation
+            "CHEM 353": ["CHEM 351"],              # P-Chem II after P-Chem I
+            "CHEM 390GW": ["CHEM 235"],            # GW writing/research after core chemistry
+            "CHEM 426": ["CHEM 325"],              # Adv Inorganic Lab after Inorganic Chem
+            "CHEM 451": ["CHEM 351"],              # Exp Physical Chemistry after P-Chem I
         }
 
         for prereqs in [cs_prereqs, cmpe_prereqs, psy_prereqs, biol_prereqs, chem_prereqs]:
             for code, deps in prereqs.items():
-                prereq_map[code] = deps
+                # Preserve the first non-empty mapping for shared codes to avoid
+                # cross-program overrides (e.g., CSC keys present in both CS and CMPE).
+                if code not in prereq_map or not prereq_map[code]:
+                    prereq_map[code] = deps
 
         return prereq_map
 

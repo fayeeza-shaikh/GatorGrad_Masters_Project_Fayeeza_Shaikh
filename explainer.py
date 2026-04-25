@@ -33,6 +33,8 @@ from bulletin_data import (
     DegreeProgram,
 )
 
+from recommender import CS_PROGRAMMING_INTRO
+
 
 # =============================================================================
 # EXPLAINER CLASS — Agent 3
@@ -142,11 +144,17 @@ class PathwayExplainer:
 
         prereqs = self.prereq_map.get(course.code, [])
         if prereqs:
-            prereq_str = ", ".join(prereqs)
+            display = [
+                "CSC 210 or both CSC 101 and CSC 215" if p == CS_PROGRAMMING_INTRO else p
+                for p in prereqs
+            ]
+            prereq_str = ", ".join(display)
             reasons.append(
                 f"Requires {prereq_str} as prerequisite(s), "
                 f"which will be completed before {semester.label}."
             )
+            if course.code == "CSC 413":
+                reasons.append("CSC 413 requires grades of C or better in those prerequisites.")
 
         unlocks = self.reverse_prereq_map.get(course.code, [])
         if unlocks:
@@ -411,6 +419,8 @@ class PathwayExplainer:
 
         for course, prereqs in self.prereq_map.items():
             for prereq in prereqs:
+                if prereq.startswith("__"):
+                    continue
                 if prereq not in reverse:
                     reverse[prereq] = []
                 reverse[prereq].append(course)

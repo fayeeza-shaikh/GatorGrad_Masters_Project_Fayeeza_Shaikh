@@ -397,10 +397,44 @@ class DPRParser:
                 matches.append(match)
 
         for req in program.university_requirements:
+            if req.req_id == "UNIV_GWAR":
+                gwar_completed = self._find_completed_gwar_course(completed_codes)
+                if gwar_completed:
+                    matches.append(RequirementMatch(
+                        req_id=req.req_id,
+                        req_name=req.name,
+                        category=req.category,
+                        status=RequirementStatus.COMPLETE,
+                        fulfilled_by=gwar_completed,
+                        units_needed=req.units,
+                        notes="Satisfied by GWAR-designated course in major/GE"
+                    ))
+                    continue
+
+                gwar_in_progress = self._find_completed_gwar_course(in_progress)
+                if gwar_in_progress:
+                    matches.append(RequirementMatch(
+                        req_id=req.req_id,
+                        req_name=req.name,
+                        category=req.category,
+                        status=RequirementStatus.IN_PROGRESS,
+                        fulfilled_by=gwar_in_progress,
+                        units_needed=req.units,
+                        notes="Will be satisfied by GWAR-designated course in progress"
+                    ))
+                    continue
+
             match = self._match_one_requirement(req, completed_codes, in_progress, used_courses)
             matches.append(match)
 
         return matches
+
+    @staticmethod
+    def _find_completed_gwar_course(course_codes: Set[str]) -> Optional[str]:
+        for code in sorted(course_codes):
+            if code.strip().endswith("GW"):
+                return code
+        return None
 
     def _match_one_requirement(
         self,
